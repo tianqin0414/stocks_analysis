@@ -41,6 +41,23 @@ DEC_END       = '20251231'
 KLINE_1D_DIR = os.path.join(KLINE_ROOT, '1d')
 KLINE_1M_DIR = os.path.join(KLINE_ROOT, '1m')
 
+# 参考股票列表（2025-12-01 时已存在的股票）
+REFERENCE_CSV = '/Users/tq/PycharmProjects/stocks_v2/data/2025/china_2025-12-01.csv'
+
+
+# ============================================================
+# 辅助：加载参考股票列表（排除新股）
+# ============================================================
+def load_reference_codes(csv_path: str) -> set:
+    """从 china_2025-12-01.csv 读取所有股票代码，返回 set。"""
+    if not os.path.exists(csv_path):
+        print("  ⚠️  参考文件不存在: {}，跳过新股过滤".format(csv_path))
+        return set()
+    df = pd.read_csv(csv_path, usecols=['商品代码'], dtype={'商品代码': str})
+    codes = set(df['商品代码'].astype(str).str.strip())
+    print("  参考股票列表: {} 只（来自 {}）".format(len(codes), os.path.basename(csv_path)))
+    return codes
+
 
 # ============================================================
 # 辅助：加载 1m K线（覆盖12月）
@@ -200,10 +217,19 @@ def analyze_one_day(code: str, date_str: str,
             else:
                 can_buy = '未在1m中找到达标点'
 
+    # 将 "HH:MM" 转为小数时间，方便 Excel 排序
+    first_time_num = None
+    if first_time:
+        try:
+            hh, mm = first_time.split(':')
+            first_time_num = round(int(hh) + int(mm) / 100, 2)
+        except Exception:
+            pass
+
     return {
         '股票代码':         code,
         '日期':             date_str,
-        '首次达标时间':     first_time,
+        '达标时间(数值)':   first_time_num,
         '首次达标价格':     first_price,
         'preClose':         round(pre_close, 3),
         '上一日收跌幅(%)':  round(prev_close_pct, 2) if prev_close_pct is not None else None,
@@ -248,13 +274,22 @@ def main():
     total_codes = len(code_files)
     print("  日线文件覆盖12月: {} 只股票".format(total_codes))
 
+    # 加载参考股票列表，排除新股
+    ref_codes = load_reference_codes(REFERENCE_CSV)
+
     results = []
+    skipped_new = 0
 
     for i, (key, files) in enumerate(sorted(code_files.items())):
         # 跳过北交所
         if key.endswith('_BJ'):
             continue
         code = key.split('_')[0]
+
+        # 排除新上市股票（不在参考列表中）
+        if ref_codes and code not in ref_codes:
+            skipped_new += 1
+            continue
 
         if (i + 1) % 1000 == 0:
             print("  进度: {}/{}  命中: {}".format(i + 1, total_codes, len(results)))
@@ -318,6 +353,8 @@ def main():
             if rec:
                 results.append(rec)
 
+    if ref_codes:
+        print("\n  已排除新股（251201后上市）: {} 只".format(skipped_new))
     print("\n✅ 扫描完成  命中 {} 条".format(len(results)))
 
     if not results:
@@ -331,7 +368,7 @@ def main():
     print("\n📊 结果预览（前50条）：")
     pd.set_option('display.max_columns', 20)
     pd.set_option('display.width', 220)
-    preview_cols = ['股票代码', '日期', '首次达标时间', 'preClose',
+    preview_cols = ['股票代码', '日期', '达标时间(数值)', 'preClose',
                     '上一日收跌幅(%)', '开盘涨幅(%)', '峰值涨幅(%)',
                     '回撤18%时涨幅(%)', '收盘涨幅(%)', '次日涨跌幅(%)', '能否买到']
     print(result_df[preview_cols].head(50).to_string(index=False))
