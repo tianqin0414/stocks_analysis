@@ -24,6 +24,92 @@ OUTPUT_CSV = os.path.join(OUTPUT_DIR, "tgb_zhihedaxuesheng_OCR持仓数据.csv")
 # 这些名称用于识别截图中的持仓股行
 KNOWN_STOCK_NAMES = set()
 
+# OCR 误识别的噪音名称（界面元素、品牌文字等被误识别为股票名的文本）
+NOISE_NAMES = {
+    # 界面元素误识别
+    "持仓管理", "持仓资讯", "持仓分时", "市值今", "市值合",
+    "白立併日", "涵行壮夂", "合答理",
+    # 淘股吧品牌文字误识别
+    "淘阳吧", "淘限吧", "淘胞吧", "淘服吧", "淘股吧", "淘肪",
+    "淘脂吧", "淘批量买入", "海限吧", "海頭吧", "海灣過",
+    "海我滥买入", "海級翻可台", "渝肪", "密肪",
+    "溷胞", "溜股", "溷股", "酱灣", "图股",
+    "汽量买入", "汽批量实入", "方修淘股吧",
+    "淘特仓资讯", "行情愛",
+}
+
+
+def is_noise_name(name):
+    """判断是否为OCR噪音（非真实股票名称）"""
+    if not isinstance(name, str) or not name.strip():
+        return True
+    name = name.strip()
+    if name in NOISE_NAMES:
+        return True
+    # 包含"淘"+"吧"组合的基本都是淘股吧界面文字
+    if "淘" in name and "吧" in name:
+        return True
+    # 包含"海"+"吧"组合（淘股吧的OCR变体）
+    if "海" in name and "吧" in name:
+        return True
+    # 包含界面关键词的短文本
+    ui_keywords = ["持仓", "管理", "批量", "行情", "挂合", "市值"]
+    for kw in ui_keywords:
+        if kw in name and len(name) <= 5:
+            return True
+    return False
+
+
+def validate_and_fix_holdings(holdings):
+    """
+    校验并修复OCR提取的持仓数据
+    - 过滤噪音名称条目
+    - 用 (现价-成本价)/成本价 交叉验证盈亏百分比
+    - 用 市值/现价 交叉验证持仓数量
+    返回: 过滤和修正后的 holdings 列表
+    """
+    cleaned = []
+    for h in holdings:
+        name = h.get("股票名称", "")
+
+        # 过滤OCR误识别的股票名称
+        if is_noise_name(name):
+            continue
+
+        cost = h.get("成本价")
+        price = h.get("现价")
+
+        # 验证并修正盈亏百分比
+        if cost and price and cost > 0:
+            calculated_pct = round((price - cost) / cost * 100, 2)
+            ocr_pct = h.get("盈亏百分比")
+            if ocr_pct is None or abs(ocr_pct - calculated_pct) > 1.0:
+                # OCR值缺失或偏差超过1个百分点，用计算值替换
+                h["盈亏百分比"] = calculated_pct
+
+        # 交叉验证持仓数量（用 市值/现价 估算）
+        shares = h.get("持仓数量")
+        market_val = h.get("市值")
+        if price and price > 0 and market_val and market_val > 0:
+            expected_shares = round(market_val / price / 100) * 100  # 取整到100股
+            if expected_shares > 0 and shares:
+                deviation = abs(shares - expected_shares) / expected_shares
+                if deviation > 0.5:
+                    # 偏差超过50%，用计算值修正
+                    h["持仓数量"] = expected_shares
+
+        # 验证盈亏金额
+        pnl = h.get("盈亏金额")
+        if cost and price and shares and shares > 0:
+            expected_pnl = round((price - cost) * shares, 2)
+            if pnl is not None and expected_pnl != 0:
+                if abs(pnl - expected_pnl) > abs(expected_pnl) * 0.5:
+                    h["盈亏金额"] = expected_pnl
+
+        cleaned.append(h)
+
+    return cleaned
+
 
 def ocr_image(img_path):
     """使用 macOS Vision 进行 OCR，返回按 y 坐标排序的文本行"""
@@ -366,14 +452,17 @@ def main():
             holdings, summary = extract_holdings_from_ocr(ocr_results, date_str)
             
             if holdings:
-                all_data[date_str] = {
-                    "holdings": holdings,
-                    "summary": summary,
-                }
-                # 动态更新已知股票名称
-                for h in holdings:
-                    if h["股票名称"]:
-                        KNOWN_STOCK_NAMES.add(h["股票名称"])
+                # 校验和修正OCR数据（过滤噪音、修正异常值）
+                holdings = validate_and_fix_holdings(holdings)
+                if holdings:  # 过滤后可能为空
+                    all_data[date_str] = {
+                        "holdings": holdings,
+                        "summary": summary,
+                    }
+                    # 动态更新已知股票名称
+                    for h in holdings:
+                        if h["股票名称"]:
+                            KNOWN_STOCK_NAMES.add(h["股票名称"])
             else:
                 failed.append(date_str)
         
